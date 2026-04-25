@@ -1,0 +1,39 @@
+PAYWALLED - Citation and Abstract
+
+Full Citation:
+Deng, Y., Bao, F., Kong, Y., Ren, Z., & Dai, Q. (2017). Deep direct reinforcement learning for
+financial signal representation and trading. IEEE Transactions on Neural Networks and Learning
+Systems, 28(3), 653-664.
+
+DOI: 10.1109/TNNLS.2016.2522401
+
+Publisher: IEEE
+Published: March 2017 (accepted/online 2016)
+ISSN: 2162-237X
+
+URL: https://ieeexplore.ieee.org/document/7407387
+
+Abstract:
+This paper proposes a recurrent deep neural network for real-time financial signal
+representation and trading. The architecture combines deep learning for automatic feature
+extraction from dynamic market conditions with reinforcement learning for trading decision
+making under uncertainty. The authors introduce a task-aware backpropagation through time
+(TBPTT) method to address the gradient vanishing problem in deep training. The model
+directly optimizes risk-adjusted returns including the differential Sharpe ratio and accounts
+for transaction costs. Experiments on commodity futures (crude oil, gold, natural gas, corn)
+demonstrate that the proposed approach outperforms existing techniques including random
+forests and multi-layer perceptrons.
+
+Key Contributions:
+- Deep Direct Reinforcement Learning (DDRL) framework combining CNN/RNN with RL
+- Task-aware BPTT for improved gradient flow
+- End-to-end optimization of risk-adjusted portfolio returns
+- Handles transaction costs directly in reward function
+
+Relevance to Thesis:
+Foundational paper on applying deep RL directly to trading/portfolio decisions.
+Demonstrates feasibility of replacing traditional technical indicators with
+end-to-end learned representations for financial signal processing.
+
+Access: IEEE Xplore subscription required
+Alternative: Check university library access or ResearchGate request to authors
