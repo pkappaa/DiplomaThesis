@@ -1,34 +1,137 @@
-"""Minimum Variance Portfolio."""
+"""Minimum Variance Portfolio — Ledoit-Wolf covariance, expanding window."""
 
+import json
+import sys
+import warnings
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from scipy.optimize import minimize
+from sklearn.covariance import LedoitWolf
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import ASSETS, TRANSACTION_COST, RANDOM_SEED
+
+DATA_DIR   = Path(__file__).parent.parent / "data" / "processed"
+STRATEGY   = "min_variance"
+N_ASSETS   = len(ASSETS)
+N_RESTARTS = 5
 
 
-def min_var_weights(cov_matrix: np.ndarray) -> np.ndarray:
-    n = cov_matrix.shape[0]
+def _load_data():
+    panel   = pd.read_csv(DATA_DIR / "daily_returns.csv", parse_dates=["date"])
+    returns = panel.pivot(index="date", columns="ticker", values="ret_1d")[ASSETS]
+    with open(DATA_DIR / "splits.json") as f:
+        splits = json.load(f)
+    return returns, splits
+
+
+def _monthly_rebal_dates(index: pd.DatetimeIndex, start: str, end: str) -> list:
+    """First trading day of each calendar month within [start, end]."""
+    idx = index[(index >= pd.Timestamp(start)) & (index <= pd.Timestamp(end))]
+    result, current_ym = [], None
+    for d in idx:
+        ym = (d.year, d.month)
+        if ym != current_ym:
+            result.append(d)
+            current_ym = ym
+    return result
+
+
+def _min_var_weights(hist: pd.DataFrame) -> np.ndarray:
+    """
+    Minimize portfolio variance with Ledoit-Wolf shrinkage covariance.
+    Uses N_RESTARTS Dirichlet starting points via SLSQP.
+    Falls back to equal weight on failure.
+    """
+    data = hist.dropna()
+    if len(data) < N_ASSETS + 1:
+        return np.ones(N_ASSETS) / N_ASSETS
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sigma = LedoitWolf().fit(data.values).covariance_
 
     def portfolio_variance(w):
-        return w @ cov_matrix @ w
+        return float(w @ sigma @ w)
 
-    constraints = {"type": "eq", "fun": lambda w: w.sum() - 1}
-    bounds = [(0, 1)] * n
-    result = minimize(portfolio_variance, np.ones(n) / n,
-                      bounds=bounds, constraints=constraints)
-    return result.x
+    constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+    bounds      = [(0.0, 1.0)] * N_ASSETS
+    rng         = np.random.default_rng(RANDOM_SEED)
+
+    best_val, best_w = np.inf, None
+    for _ in range(N_RESTARTS):
+        w0  = rng.dirichlet(np.ones(N_ASSETS))
+        res = minimize(portfolio_variance, w0, method="SLSQP",
+                       bounds=bounds, constraints=constraints,
+                       options={"ftol": 1e-12, "maxiter": 1000})
+        if res.success and res.fun < best_val:
+            best_val, best_w = res.fun, res.x.copy()
+
+    if best_w is None:
+        print(f"WARNING [{STRATEGY}]: all restarts failed. Using equal weights.")
+        return np.ones(N_ASSETS) / N_ASSETS
+
+    w     = np.clip(best_w, 0.0, 1.0)
+    total = w.sum()
+    return w / total if total > 1e-10 else np.ones(N_ASSETS) / N_ASSETS
 
 
-def rolling_backtest(log_returns: pd.DataFrame, estimation_window: int = 252,
-                     rebalance_freq: int = 21) -> pd.Series:
-    portfolio_returns = []
+def backtest(returns: pd.DataFrame, splits: dict) -> pd.Series:
+    """Min-variance backtest; expanding window; 10bps TC on monthly rebalance."""
+    val_start   = splits["val"]["start"]
+    test_end    = splits["test"]["end"]
+    returns     = returns.loc[:test_end]
+    rebal_dates = _monthly_rebal_dates(returns.index, val_start, test_end)
 
-    for t in range(estimation_window, len(log_returns), rebalance_freq):
-        window = log_returns.iloc[t - estimation_window:t]
-        sigma  = window.cov().values * 252
-        w      = min_var_weights(sigma)
-        horizon = log_returns.iloc[t:t + rebalance_freq]
-        portfolio_returns.append(horizon @ w)
+    all_rets  = []
+    current_w = np.zeros(N_ASSETS)
 
-    result = pd.concat(portfolio_returns)
-    result.name = "min_variance"
+    for i, rdate in enumerate(rebal_dates):
+        hist  = returns[returns.index < rdate]
+        new_w = _min_var_weights(hist)
+        tc    = TRANSACTION_COST * np.abs(new_w - current_w).sum()
+
+        next_date = (rebal_dates[i + 1] if i + 1 < len(rebal_dates)
+                     else returns.index[-1] + pd.Timedelta(days=1))
+        period = returns.loc[(returns.index >= rdate) & (returns.index < next_date)]
+        if period.empty:
+            continue
+
+        rets          = (period @ new_w).copy()
+        rets.iloc[0] -= tc
+        all_rets.append(rets)
+
+        growth    = np.exp(period.fillna(0).values.sum(axis=0))
+        drifted_w = new_w * growth
+        current_w = drifted_w / drifted_w.sum()
+
+    result      = pd.concat(all_rets)
+    result.name = STRATEGY
     return result
+
+
+if __name__ == "__main__":
+    returns, splits = _load_data()
+    rets = backtest(returns, splits)
+
+    out_path = DATA_DIR / f"{STRATEGY}_returns.csv"
+    rets.to_csv(out_path)
+
+    last_rdate = _monthly_rebal_dates(
+        returns.index, splits["val"]["start"], splits["test"]["end"]
+    )[-1]
+    final_w = _min_var_weights(returns[returns.index < last_rdate])
+
+    ann_ret = rets.mean() * 252
+    ann_vol = rets.std() * np.sqrt(252)
+    sharpe  = ann_ret / ann_vol
+
+    print(f"\n=== {STRATEGY} ===")
+    print("Final weights:")
+    for ticker, w in zip(ASSETS, final_w):
+        print(f"  {ticker}: {w:.4f}")
+    print(f"Annualized return : {ann_ret:.4%}")
+    print(f"Annualized vol    : {ann_vol:.4%}")
+    print(f"Sharpe ratio      : {sharpe:.4f}")
+    print(f"Saved -> {out_path}")

@@ -1,5 +1,5 @@
 """
-Download raw daily OHLCV data for the 11 SPDR sector ETFs and the SPY benchmark.
+Download raw daily OHLCV data for the  SPDR sector ETFs and the SPY benchmark.
 
 Strategy
 --------

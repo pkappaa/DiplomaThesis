@@ -7,4 +7,5 @@ torch
 stable-baselines3[extra]
 gymnasium
 scikit-learn
+tqdm
 jupyter

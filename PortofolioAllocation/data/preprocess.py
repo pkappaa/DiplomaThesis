@@ -9,7 +9,7 @@ Preprocess raw OHLCV CSVs into three ML-ready artefacts:
 Design philosophy
 -----------------
 The ultimate task is a CROSS-SECTIONAL RANKING problem: each week, identify
-which of the 11 SPDR sector ETFs will outperform the median and overweight them.
+which of the 9 SPDR sector ETFs will outperform the median and overweight them.
 The feature set is designed with two complementary views:
 
   Time-series features  (ret_5d, ret_21d, vol_21d, rsi_14)
@@ -25,7 +25,7 @@ The feature set is designed with two complementary views:
 
   Market features  (spy_ret_1d, spy_vol_21d)
       Macro context: overall market direction and volatility regime.  Shared
-      across all 11 assets on a given day; act as a regime-aware conditioning
+      across all 9 assets on a given day; act as a regime-aware conditioning
       signal for both the LSTM and the RL observation space.
 
 Binary label motivation
