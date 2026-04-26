@@ -1,33 +1,28 @@
 """
-Data loading, weekly aggregation, expanding-window normalisation, and
-sequence construction for the LSTM beat-median classifier.
+Data loading, daily label computation, expanding-window normalisation, and
+multi-task sequence construction for the LSTM beat-median classifier.
+
+Fischer & Krauss (2018) daily sliding-window approach:
+  - Features: daily, 11 features per asset (unchanged)
+  - Sequences: X[i] = daily_features[i : i+240], shape (240, 99)
+  - Labels:    daily beat-median binary, y[i] = label for day i+240, shape (9,)
+  - Slide step: 1 trading day
 
 Pipeline
 --------
   load_data()
-    → aggregate_to_weekly()          daily (date, ticker, 9 feats)
-                                     → weekly (week_end, ticker, 9 feats)
-    → expanding_zscore(..., 'week_end')
-    → build_sequences()              → X (N, 52, 9), y (N,), metadata
-
-Weekly aggregation rules (per spec)
-------------------------------------
-  Returns / momentum  ret_1d, ret_5d, ret_21d, spy_ret_1d  → mean
-  Volatility          vol_21d, spy_vol_21d                  → max
-  Oscillators / rank  rsi_14, rank, zscore                  → last (Friday value)
+    → expanding_zscore(daily, date_col='date')
+    → build_sequences()     → X (n_days, 240, 99), y (n_days, 9), ...
 
 Sequence layout
 ---------------
-For prediction week T (week_end = Friday F_T):
-  X = the 52 feature weeks with week_end STRICTLY BEFORE F_T  → shape (52, 9)
-  y = 1 iff asset beat cross-sectional median return during week T
+For prediction day T (the day after the 240-day feature window):
+  X = daily_features[T-240 : T]   shape (240, 99)
+  y = beat-median labels for day T  shape (9,)
 
-No-lookahead guarantee: bisect_left finds the position of F_T in the sorted
-feature-week index; slicing [pos-52 : pos] excludes week T's own aggregated
-features entirely.
+No-lookahead: X ends at day T-1; labels are for day T.
 """
 
-import bisect
 import json
 from pathlib import Path
 
@@ -39,57 +34,36 @@ PROCESSED = Path("data/processed")
 
 FEAT_COLS = [
     "ret_1d", "ret_5d", "ret_21d", "vol_21d",
-    "rsi_14", "rank", "zscore",
+    "rsi_14", "momentum_12_1", "reversal_1m",
+    "rank", "zscore",
     "spy_ret_1d", "spy_vol_21d",
 ]
 
-# Aggregation rules for collapsing ~5 daily rows into one weekly row
-WEEKLY_AGG: dict[str, str] = {
-    "ret_1d":     "mean",
-    "ret_5d":     "mean",
-    "ret_21d":    "mean",
-    "vol_21d":    "max",
-    "rsi_14":     "last",
-    "rank":       "last",
-    "zscore":     "mean",
-    "spy_ret_1d": "mean",
-    "spy_vol_21d":"max",
-}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _compute_daily_labels(daily_long: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each trading day, label each asset 1 if its ret_1d exceeds the
+    cross-sectional median across all 9 assets that day.
+    """
+    wide = daily_long.pivot(index="date", columns="ticker", values="ret_1d")
+    med  = wide.median(axis=1)
+    labs = wide.gt(med, axis=0).astype(float)
+    long = labs.stack().reset_index()
+    long.columns = ["date", "ticker", "label"]
+    return long
 
 
 # ── public loaders ────────────────────────────────────────────────────────────
 
 def load_data():
-    """Return (daily_long, weekly_labels, splits_dict)."""
-    daily  = pd.read_csv(PROCESSED / "daily_returns.csv",  parse_dates=["date"])
-    labels = pd.read_csv(PROCESSED / "weekly_labels.csv",  parse_dates=["week_end"])
+    """Return (daily_long, daily_labels, splits_dict)."""
+    daily = pd.read_csv(PROCESSED / "daily_returns.csv", parse_dates=["date"])
     with open(PROCESSED / "splits.json") as fh:
         splits = json.load(fh)
-    return daily, labels, splits
-
-
-# ── weekly aggregation ────────────────────────────────────────────────────────
-
-def aggregate_to_weekly(daily_long: pd.DataFrame) -> pd.DataFrame:
-    """
-    Collapse daily long-format features into one row per (W-FRI week, ticker).
-
-    Each trading day is assigned to the Friday of its calendar week via
-    dayofweek arithmetic: offset = (4 - dayofweek) % 7.  This produces the
-    same Friday dates as pandas W-FRI resampling used in preprocess.py, so
-    the resulting week_end column aligns exactly with weekly_labels.week_end.
-    """
-    df = daily_long.copy()
-    offset = (4 - df["date"].dt.dayofweek) % 7
-    df["week_end"] = (df["date"] + pd.to_timedelta(offset, unit="D")).dt.normalize()
-
-    weekly = (
-        df.sort_values(["week_end", "ticker", "date"])          # sort so 'last' = Friday
-        .groupby(["week_end", "ticker"], sort=True)
-        .agg(WEEKLY_AGG)
-        .reset_index()
-    )
-    return weekly   # columns: week_end, ticker, ret_1d, …
+    daily_labels = _compute_daily_labels(daily)
+    return daily, daily_labels, splits
 
 
 # ── normalisation ─────────────────────────────────────────────────────────────
@@ -101,8 +75,7 @@ def expanding_zscore(df_long: pd.DataFrame, date_col: str = "date") -> pd.DataFr
     For each period T, features are normalised using running mean/std
     accumulated from ALL (period ≤ T, asset) observations seen so far.
     Supports both daily data (date_col='date') and weekly data
-    (date_col='week_end').  Returns a DataFrame with identical shape and
-    columns, feature values replaced by their z-scored counterparts.
+    (date_col='week_end').
     """
     df_long = df_long.sort_values([date_col, "ticker"]).reset_index(drop=True)
     dates = sorted(df_long[date_col].unique())
@@ -122,13 +95,13 @@ def expanding_zscore(df_long: pd.DataFrame, date_col: str = "date") -> pd.DataFr
 
             if n < 2:
                 mu  = float(np.nanmean(orig))
-                sig = float(np.nanstd(orig)) + 1e-8
+                sig = max(float(np.nanstd(orig)), 1e-8)
             else:
                 mu  = acc_sum[f] / n
                 var = acc_sq[f] / n - mu ** 2
-                sig = float(np.sqrt(max(var, 0.0))) + 1e-8
+                sig = max(float(np.sqrt(max(var, 0.0))), 1e-8)
 
-            day_df[f] = (orig - mu) / sig
+            day_df[f] = np.clip((orig - mu) / sig, -10.0, 10.0)
 
             valid = orig[~np.isnan(orig)]
             acc_n[f]   += len(valid)
@@ -143,75 +116,140 @@ def expanding_zscore(df_long: pd.DataFrame, date_col: str = "date") -> pd.DataFr
 # ── sequence construction ─────────────────────────────────────────────────────
 
 def build_sequences(
-    weekly_norm: pd.DataFrame,
-    weekly_labels: pd.DataFrame,
-    lookback: int = 52,
+    daily_norm: pd.DataFrame,
+    daily_labels: pd.DataFrame,
+    lookback: int = 240,
+    slide_step: int = 1,
 ):
     """
-    Build training tensors from weekly-normalised features and weekly labels.
+    Build multi-task training tensors from daily-normalised features and labels.
+    Fischer & Krauss (2018) daily sliding-window approach.
 
     Parameters
     ----------
-    weekly_norm   : output of expanding_zscore on weekly-aggregated data.
-                    Must have columns: week_end, ticker, and FEAT_COLS.
-    weekly_labels : long format with week_end (Friday), ticker, label.
-    lookback      : number of weekly timesteps per sequence (default 52).
+    daily_norm   : output of expanding_zscore on daily data.
+                   Must have columns: date, ticker, and FEAT_COLS.
+    daily_labels : long format with date, ticker, label (daily beat-median).
+    lookback     : number of daily timesteps per sequence (default 240 ≈ 1 year).
+    slide_step   : stride between consecutive sequences in trading days (default 1).
 
     Returns
     -------
-    X          : FloatTensor (n_samples, lookback, n_features)  — 52 weekly steps
-    y          : FloatTensor (n_samples,)
-    week_dates : list[pd.Timestamp]  — label week_end per sample
-    asset_names: list[str]           — ticker per sample
+    X          : FloatTensor (n_samples, lookback, n_assets * n_features)
+                 Each timestep concatenates all assets' features in alphabetical order.
+                 Feature block order: [asset0_f0..f10, asset1_f0..f10, ...]
+    y          : FloatTensor (n_samples, n_assets)  — NaN where label is missing.
+    date_list  : list[pd.Timestamp]  — label date per sample (day after window end).
+    asset_names: list[str]           — tickers in consistent alphabetical order.
     """
-    # Wide format: index = week_end (Friday), MultiIndex columns = (feature, ticker)
-    weekly_wide = weekly_norm.pivot(
-        index="week_end", columns="ticker", values=FEAT_COLS
+    daily_wide = daily_norm.pivot(
+        index="date", columns="ticker", values=FEAT_COLS
     ).sort_index()
-    all_weeks = list(weekly_wide.index)   # sorted pd.Timestamps (Fridays)
+    all_dates = list(daily_wide.index)
+    n_days    = len(all_dates)
 
-    assets = sorted(weekly_labels["ticker"].unique())
+    assets = sorted(daily_labels["ticker"].unique())
 
-    # Pre-extract per-asset arrays in FEAT_COLS order for O(1) slicing later
+    # Pre-extract per-asset feature arrays: shape (n_total_days, n_feats)
     asset_arrs: dict[str, np.ndarray] = {}
     for asset in assets:
         arr = np.column_stack(
-            [weekly_wide[(f, asset)].values for f in FEAT_COLS]
+            [daily_wide[(f, asset)].values for f in FEAT_COLS]
         ).astype(np.float32)
         asset_arrs[asset] = np.nan_to_num(arr, nan=0.0)
 
-    # Fast O(1) label lookup
     labels_dict = (
-        weekly_labels.set_index(["week_end", "ticker"])["label"].to_dict()
+        daily_labels.set_index(["date", "ticker"])["label"].to_dict()
     )
 
-    week_dates_unique = sorted(weekly_labels["week_end"].unique())
+    X_list, y_list, date_list = [], [], []
 
-    X_list, y_list, wk_list, asset_list = [], [], [], []
+    for i in range(lookback, n_days, slide_step):
+        label_date_ts = pd.Timestamp(all_dates[i])
+        start_idx     = i - lookback
 
-    for week_end in week_dates_unique:
-        week_end_ts = pd.Timestamp(week_end)
+        # Concatenate all assets' feature blocks per timestep → (lookback, n_assets * n_feats)
+        feat_blocks = [asset_arrs[a][start_idx:i] for a in assets]
+        feat_mat    = np.concatenate(feat_blocks, axis=1).astype(np.float32)
 
-        # bisect_left returns the position of week_end_ts in all_weeks.
-        # Slice [pos-lookback : pos] contains exactly the lookback feature
-        # weeks that end STRICTLY BEFORE week_end_ts — no lookahead.
-        prior_idx = bisect.bisect_left(all_weeks, week_end_ts)
-        if prior_idx < lookback:
+        y_row = [
+            float(labels_dict[(label_date_ts, a)])
+            if (label_date_ts, a) in labels_dict
+            else float("nan")
+            for a in assets
+        ]
+        if all(np.isnan(v) for v in y_row):
             continue
 
-        start_idx = prior_idx - lookback
-
-        for asset in assets:
-            label = labels_dict.get((week_end_ts, asset))
-            if label is None:
-                continue
-
-            feat_mat = asset_arrs[asset][start_idx:prior_idx]  # (lookback, F)
-            X_list.append(feat_mat)
-            y_list.append(float(label))
-            wk_list.append(week_end_ts)
-            asset_list.append(asset)
+        X_list.append(feat_mat)
+        y_list.append(y_row)
+        date_list.append(label_date_ts)
 
     X = torch.from_numpy(np.array(X_list, dtype=np.float32))
     y = torch.from_numpy(np.array(y_list,  dtype=np.float32))
-    return X, y, wk_list, asset_list
+
+    _print_sanity_checks(X, y, date_list, assets, all_dates)
+
+    return X, y, date_list, assets
+
+
+def save_sequences(
+    X: torch.Tensor,
+    y: torch.Tensor,
+    date_list: list,
+    asset_names: list,
+    path: Path = PROCESSED / "sequences.pt",
+) -> None:
+    """Persist build_sequences output for downstream RL/predict use."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"X": X, "y": y, "dates": date_list, "assets": asset_names}, path)
+    print(f"Saved sequences -> {path}  (X={tuple(X.shape)}, y={tuple(y.shape)})")
+
+
+def _print_sanity_checks(
+    X: torch.Tensor,
+    y: torch.Tensor,
+    date_list: list,
+    assets: list,
+    all_dates: list,
+) -> None:
+    sep = "=" * 62
+    print(f"\n{sep}\nBUILD_SEQUENCES SANITY CHECK\n{sep}")
+
+    n    = len(date_list)
+    y_np = y.numpy()
+    x_np = X.numpy()
+
+    # [1] Total samples
+    print(f"\n[1] Total samples: {n}")
+    print(f"    X shape : {tuple(X.shape)}")
+    print(f"    y shape : {tuple(y.shape)}")
+
+    # [2] Label distribution per asset (target 40–60 %)
+    print(f"\n[2] Label distribution per asset (target 40–60%)")
+    for i, asset in enumerate(assets):
+        col   = y_np[:, i]
+        valid = col[~np.isnan(col)]
+        if len(valid) == 0:
+            continue
+        pos  = int(valid.sum())
+        frac = pos / len(valid)
+        flag = "  ← CHECK" if not (0.40 <= frac <= 0.60) else ""
+        print(f"    {asset}: {pos}/{len(valid)} ({frac:.1%}){flag}")
+
+    # [3] Date alignment: X[-1] date → y date must be next trading day
+    print(f"\n[3] Date alignment  (X[-1] date  ->  label date = next trading day)")
+    date_to_idx = {d: k for k, d in enumerate(all_dates)}
+    for idx in [0, n // 2, n - 1]:
+        label_dt  = date_list[idx]
+        pos       = date_to_idx[label_dt]
+        feat_last = all_dates[pos - 1]
+        print(f"    [{idx:6d}]  X[-1]={pd.Timestamp(feat_last).date()}  "
+              f"->  label={label_dt.date()}")
+
+    # [4] Feature value range (should be roughly –3 to +3 after z-score)
+    print(f"\n[4] Feature value range after expanding z-score:")
+    print(f"    min={x_np.min():.4f}  max={x_np.max():.4f}  "
+          f"mean={x_np.mean():.4f}  std={x_np.std():.4f}")
+
+    print(f"{sep}\n")

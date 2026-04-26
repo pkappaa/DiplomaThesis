@@ -116,22 +116,27 @@ def build_daily_features() -> pd.DataFrame:
 
     Column layout
     -------------
-    date         : trading day (index in intermediate DataFrame; column in CSV)
-    ticker       : asset identifier (one of the 11 SPDR ETFs)
-    ret_1d       : log return on the *current* day  (point-in-time, no lookahead)
-    ret_5d       : 5-day cumulative log return computed from ret.shift(1)
-                   → sum of returns from T-5 to T-1
-    ret_21d      : 21-day cumulative log return (same convention)
-    vol_21d      : 21-day realised daily volatility (std of log returns T-21..T-1)
-                   Annualise downstream with × sqrt(252)
-    rsi_14       : 14-day RSI in [0, 100] from lagged returns
-    rank         : cross-sectional rank of ret_1d within the 11-asset universe
-                   on each day; 1 = worst performer, 11 = best
-    zscore       : (ret_1d − universe_mean) / universe_std on each day
-                   measures relative strength in std-dev units
-    spy_ret_1d   : SPY log return (market direction signal, same for all assets)
-    spy_vol_21d  : 21-day rolling SPY log-return volatility
-                   (VIX-like proxy for market fear / risk regime)
+    date           : trading day (index in intermediate DataFrame; column in CSV)
+    ticker         : asset identifier (one of the 11 SPDR ETFs)
+    ret_1d         : log return on the *current* day  (point-in-time, no lookahead)
+    ret_5d         : 5-day cumulative log return computed from ret.shift(1)
+                     → sum of returns from T-5 to T-1
+    ret_21d        : 21-day cumulative log return (same convention)
+    vol_21d        : 21-day realised daily volatility (std of log returns T-21..T-1)
+                     Annualise downstream with × sqrt(252)
+    rsi_14         : 14-day RSI in [0, 100] from lagged returns
+    momentum_12_1  : Jegadeesh-Titman factor — 252-day cum log return minus 21-day
+                     cum log return, cross-sectionally z-scored.  Skips the most
+                     recent month to avoid short-term reversal contamination.
+    reversal_1m    : negative of 21-day cum log return, cross-sectionally z-scored.
+                     Captures short-term mean reversion (Lo-MacKinlay, 1990).
+    rank           : cross-sectional rank of ret_1d within the 11-asset universe
+                     on each day; 1 = worst performer, 11 = best
+    zscore         : (ret_1d − universe_mean) / universe_std on each day
+                     measures relative strength in std-dev units
+    spy_ret_1d     : SPY log return (market direction signal, same for all assets)
+    spy_vol_21d    : 21-day rolling SPY log-return volatility
+                     (VIX-like proxy for market fear / risk regime)
     """
     # ── load prices ───────────────────────────────────────────────────────────
     closes    = pd.concat([_load_close(t) for t in ASSETS], axis=1).sort_index()
@@ -157,8 +162,9 @@ def build_daily_features() -> pd.DataFrame:
 
     # ── time-series features (all built from ret_lag) ─────────────────────────
     # Momentum: cumulative log-return over the past N days (= log price ratio)
-    ret_5d  = ret_lag.rolling(5,  min_periods=5).sum()
-    ret_21d = ret_lag.rolling(21, min_periods=21).sum()
+    ret_5d   = ret_lag.rolling(5,   min_periods=5).sum()
+    ret_21d  = ret_lag.rolling(21,  min_periods=21).sum()
+    ret_252d = ret_lag.rolling(252, min_periods=252).sum()
 
     # Realised volatility: dispersion of daily log returns over past 21 days.
     # A wider window (e.g., 63d) is more stable but slower to react to regimes.
@@ -172,6 +178,19 @@ def build_daily_features() -> pd.DataFrame:
     # High SPY vol periods correlate with broad risk-off rotation, which the
     # RL agent and LSTM should learn to navigate differently.
     spy_vol_21d = spy_lag.rolling(21, min_periods=21).std()
+
+    # Jegadeesh-Titman (1993) 12-1 momentum: 252-day return minus 21-day return.
+    # Subtracting the recent month avoids short-term reversal contamination.
+    momentum_12_1_raw = ret_252d - ret_21d
+    m121_cs_mean      = momentum_12_1_raw.mean(axis=1)
+    m121_cs_std       = momentum_12_1_raw.std(axis=1).replace(0, np.nan)
+    momentum_12_1     = momentum_12_1_raw.sub(m121_cs_mean, axis=0).div(m121_cs_std, axis=0)
+
+    # Lo-MacKinlay (1990) short-term reversal: negative of 21-day return.
+    reversal_1m_raw = -ret_21d
+    rev_cs_mean     = reversal_1m_raw.mean(axis=1)
+    rev_cs_std      = reversal_1m_raw.std(axis=1).replace(0, np.nan)
+    reversal_1m     = reversal_1m_raw.sub(rev_cs_mean, axis=0).div(rev_cs_std, axis=0)
 
     # ── cross-sectional features (use current ret; no time lookahead) ─────────
     # Cross-sectional rank: measures relative performance within the universe.
@@ -190,16 +209,18 @@ def build_daily_features() -> pd.DataFrame:
     for ticker in ASSETS:
         df_t = pd.DataFrame(
             {
-                "ticker":      ticker,
-                "ret_1d":      ret[ticker],
-                "ret_5d":      ret_5d[ticker],
-                "ret_21d":     ret_21d[ticker],
-                "vol_21d":     vol_21d[ticker],
-                "rsi_14":      rsi_14[ticker],
-                "rank":        rank[ticker],
-                "zscore":      zscore[ticker],
-                "spy_ret_1d":  spy_ret,          # market signal: identical across all assets
-                "spy_vol_21d": spy_vol_21d,
+                "ticker":         ticker,
+                "ret_1d":         ret[ticker],
+                "ret_5d":         ret_5d[ticker],
+                "ret_21d":        ret_21d[ticker],
+                "vol_21d":        vol_21d[ticker],
+                "rsi_14":         rsi_14[ticker],
+                "momentum_12_1":  momentum_12_1[ticker],
+                "reversal_1m":    reversal_1m[ticker],
+                "rank":           rank[ticker],
+                "zscore":         zscore[ticker],
+                "spy_ret_1d":     spy_ret,          # market signal: identical across all assets
+                "spy_vol_21d":    spy_vol_21d,
             },
             index=closes.index,
         )

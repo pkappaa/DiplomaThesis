@@ -24,6 +24,11 @@ from config import ASSETS, TRANSACTION_COST
 
 PROCESSED = Path("data/processed")
 
+VAL_START  = "2022-01-01"
+VAL_END    = "2023-12-31"
+TEST_START = "2024-01-01"
+TEST_END   = "2024-12-31"
+
 
 # ── weight construction ───────────────────────────────────────────────────────
 
@@ -84,7 +89,8 @@ def build_monthly_weights(
         avail = probs_df.loc[probs_df.index < rdate, ASSETS]
         if avail.empty:
             continue  # no probs yet (only the very first month can be empty)
-        rows[rdate] = probs_to_weights(avail.iloc[-1], method)
+        mean_probs = avail.tail(21).mean()
+        rows[rdate] = probs_to_weights(mean_probs, method)
 
     weights = pd.DataFrame(rows).T
     weights.index.name = "date"
@@ -165,7 +171,7 @@ def main():
         print("lstm_probabilities.csv not found — run lstm/predict.py first.")
         return
 
-    probs_df = pd.read_csv(probs_path, parse_dates=["week_end"], index_col="week_end")
+    probs_df = pd.read_csv(probs_path, parse_dates=["date"], index_col="date")
 
     # Daily log-returns wide format
     daily    = pd.read_csv(PROCESSED / "daily_returns.csv", parse_dates=["date"])
@@ -180,24 +186,40 @@ def main():
     for method in ["score_weighted", "top_k"]:
         weights = build_monthly_weights(probs_df, ret_wide.index, method)
         rets    = _backtest(ret_period, weights)
-        _evaluate(rets, f"LSTM {method}")
+
+        val_rets      = rets.loc[VAL_START:VAL_END]
+        test_rets     = rets.loc[TEST_START:TEST_END]
+        combined_rets = rets.loc[VAL_START:TEST_END]
+
+        print(f"\n{'=' * 62}")
+        print(f"LSTM  method={method}")
+        _evaluate(val_rets,      "val (2022-2023)")
+        _evaluate(test_rets,     "test (2024)")
+        _evaluate(combined_rets, "val+test 2022-2024  <- headline")
+
         if method == "score_weighted":
             primary_weights = weights
 
-    # Save primary (score_weighted) monthly weights
+    # Save primary (score_weighted) monthly weights — full 2013-2024 history
     if primary_weights is not None:
         primary_weights.to_csv(PROCESSED / "lstm_weights.csv")
-        print(f"\nSaved lstm_weights.csv ({len(primary_weights)} months)")
+        print(f"\nSaved lstm_weights.csv ({len(primary_weights)} months, "
+              f"{period_start} – {period_end})")
 
     # ── equal-weight baseline ─────────────────────────────────────────────────
     eq_path = PROCESSED / "equal_weight_returns.csv"
     if eq_path.exists():
-        eq_rets = pd.read_csv(eq_path, index_col=0, parse_dates=True).squeeze()
-        _evaluate(eq_rets.loc[period_start:period_end], "Equal Weight Baseline")
+        eq_slice = pd.read_csv(eq_path, index_col=0, parse_dates=True).squeeze()
+        eq_slice = eq_slice.loc[period_start:period_end]
     else:
-        eq_w    = np.full(len(ASSETS), 1.0 / len(ASSETS))
-        eq_rets = ret_period @ eq_w
-        _evaluate(eq_rets, "Equal Weight Baseline (computed inline)")
+        eq_w     = np.full(len(ASSETS), 1.0 / len(ASSETS))
+        eq_slice = ret_period @ eq_w
+
+    print(f"\n{'=' * 62}")
+    print("Equal Weight Baseline")
+    _evaluate(eq_slice.loc[VAL_START:VAL_END],  "val (2022-2023)")
+    _evaluate(eq_slice.loc[TEST_START:TEST_END], "test (2024)")
+    _evaluate(eq_slice.loc[VAL_START:TEST_END],  "val+test 2022-2024")
 
 
 if __name__ == "__main__":
