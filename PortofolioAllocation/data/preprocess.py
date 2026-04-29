@@ -9,7 +9,7 @@ Preprocess raw OHLCV CSVs into three ML-ready artefacts:
 Design philosophy
 -----------------
 The ultimate task is a CROSS-SECTIONAL RANKING problem: each week, identify
-which of the 9 SPDR sector ETFs will outperform the median and overweight them.
+which of the 19 multi-asset ETFs will outperform the median and overweight them.
 The feature set is designed with two complementary views:
 
   Time-series features  (ret_5d, ret_21d, vol_21d, rsi_14)
@@ -19,20 +19,21 @@ The feature set is designed with two complementary views:
       prices up through T-1.  This is the core no-lookahead guarantee.
 
   Cross-sectional features  (rank, zscore)
-      Capture where each asset sits relative to its peers *on the same day*.
+      Capture where each asset sits relative to its peers *on the same day*,
+      now computed across all 19 assets in the expanded universe.
       They use the current day's 1-day return, which is already "closed" and
       therefore not a lookahead with respect to the *future* weekly label.
 
   Market features  (spy_ret_1d, spy_vol_21d)
       Macro context: overall market direction and volatility regime.  Shared
-      across all 9 assets on a given day; act as a regime-aware conditioning
+      across all 19 assets on a given day; act as a regime-aware conditioning
       signal for both the LSTM and the RL observation space.
 
 Binary label motivation
 -----------------------
 Predicting *relative* performance (above/below median) rather than raw returns
 makes the task stationary across bull and bear markets.  A model that learns
-sector rotation signals can still generate alpha even when all sectors fall —
+cross-asset rotation signals can still generate alpha even when all assets fall —
 it just overweights the ones that fall least.  The binary label is also more
 robust to extreme outlier returns than a continuous regression target.
 
@@ -117,7 +118,7 @@ def build_daily_features() -> pd.DataFrame:
     Column layout
     -------------
     date           : trading day (index in intermediate DataFrame; column in CSV)
-    ticker         : asset identifier (one of the 11 SPDR ETFs)
+    ticker         : asset identifier (one of the 19 multi-asset ETFs)
     ret_1d         : log return on the *current* day  (point-in-time, no lookahead)
     ret_5d         : 5-day cumulative log return computed from ret.shift(1)
                      → sum of returns from T-5 to T-1
@@ -126,12 +127,14 @@ def build_daily_features() -> pd.DataFrame:
                      Annualise downstream with × sqrt(252)
     rsi_14         : 14-day RSI in [0, 100] from lagged returns
     momentum_12_1  : Jegadeesh-Titman factor — 252-day cum log return minus 21-day
-                     cum log return, cross-sectionally z-scored.  Skips the most
-                     recent month to avoid short-term reversal contamination.
-    reversal_1m    : negative of 21-day cum log return, cross-sectionally z-scored.
-                     Captures short-term mean reversion (Lo-MacKinlay, 1990).
-    rank           : cross-sectional rank of ret_1d within the 11-asset universe
-                     on each day; 1 = worst performer, 11 = best
+                     cum log return, cross-sectionally z-scored across 19 assets.
+                     Skips the most recent month to avoid short-term reversal
+                     contamination.
+    reversal_1m    : negative of 21-day cum log return, cross-sectionally z-scored
+                     across 19 assets.  Captures short-term mean reversion
+                     (Lo-MacKinlay, 1990).
+    rank           : cross-sectional rank of ret_1d within the 19-asset universe
+                     on each day; 1 = worst performer, 19 = best
     zscore         : (ret_1d − universe_mean) / universe_std on each day
                      measures relative strength in std-dev units
     spy_ret_1d     : SPY log return (market direction signal, same for all assets)
@@ -235,14 +238,14 @@ def build_daily_features() -> pd.DataFrame:
     )
 
     # Drop warm-up rows: rolling(21) + shift(1) means the first ~22 rows per
-    # ticker are NaN.  Also drops early rows for XLC (launched Jun 2018) and
-    # XLRE (launched Oct 2015), which have NaN until they start trading.
+    # ticker are NaN.  All 19 tickers are live from 2010-01-01, so the effective
+    # start is determined purely by the 252-day momentum window warm-up (~1 year).
     panel = panel.dropna()
 
     effective_start = panel["date"].min().date()
     effective_end   = panel["date"].max().date()
     print(f"  Effective date range : {effective_start} → {effective_end}")
-    print(f"  (rows before {effective_start} dropped; XLC live from Jun 2018)")
+    print(f"  (rows before {effective_start} dropped due to rolling warm-up)")
 
     return panel
 
@@ -256,11 +259,11 @@ def build_weekly_labels() -> pd.DataFrame:
     Label definition
     ----------------
     For each Friday T, label_i = 1  iff  weekly_return_i > median(weekly_returns)
-    across all 11 assets that week, else 0.
+    across all 19 assets that week, else 0.
 
-    With 11 assets and a strict '>' comparison, exactly 5 assets will exceed
-    the median (the median itself is the 6th-highest value), giving an expected
-    label mean of 5/11 ≈ 0.454 — comfortably within the [0.40, 0.60] sanity band.
+    With 19 assets and a strict '>' comparison, exactly 9 assets will exceed
+    the median (the median itself is the 10th-ranked value), giving an expected
+    label mean of 9/19 ≈ 0.474 — comfortably within the [0.40, 0.60] sanity band.
 
     Why binary?  Continuous weekly returns are noisy, fat-tailed, and
     non-stationary.  A relative binary label is robust to volatility regimes:

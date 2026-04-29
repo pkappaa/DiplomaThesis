@@ -4,21 +4,21 @@ multi-task sequence construction for the LSTM beat-median classifier.
 
 Fischer & Krauss (2018) daily sliding-window approach:
   - Features: daily, 11 features per asset (unchanged)
-  - Sequences: X[i] = daily_features[i : i+240], shape (240, 99)
-  - Labels:    daily beat-median binary, y[i] = label for day i+240, shape (9,)
+  - Sequences: X[i] = daily_features[i : i+240], shape (240, 209)
+  - Labels:    daily beat-median binary, y[i] = label for day i+240, shape (19,)
   - Slide step: 1 trading day
 
 Pipeline
 --------
   load_data()
     → expanding_zscore(daily, date_col='date')
-    → build_sequences()     → X (n_days, 240, 99), y (n_days, 9), ...
+    → build_sequences()     → X (n_days, 240, 209), y (n_days, 19), ...
 
 Sequence layout
 ---------------
 For prediction day T (the day after the 240-day feature window):
-  X = daily_features[T-240 : T]   shape (240, 99)
-  y = beat-median labels for day T  shape (9,)
+  X = daily_features[T-240 : T]   shape (240, 209)   [19 assets × 11 features]
+  y = beat-median labels for day T  shape (19,)
 
 No-lookahead: X ends at day T-1; labels are for day T.
 """
@@ -45,7 +45,7 @@ FEAT_COLS = [
 def _compute_daily_labels(daily_long: pd.DataFrame) -> pd.DataFrame:
     """
     For each trading day, label each asset 1 if its ret_1d exceeds the
-    cross-sectional median across all 9 assets that day.
+    cross-sectional median across all 19 assets that day.
     """
     wide = daily_long.pivot(index="date", columns="ticker", values="ret_1d")
     med  = wide.median(axis=1)
@@ -136,9 +136,11 @@ def build_sequences(
     Returns
     -------
     X          : FloatTensor (n_samples, lookback, n_assets * n_features)
+                 Shape: (n_days, 240, 209)  [19 assets × 11 features per timestep]
                  Each timestep concatenates all assets' features in alphabetical order.
                  Feature block order: [asset0_f0..f10, asset1_f0..f10, ...]
-    y          : FloatTensor (n_samples, n_assets)  — NaN where label is missing.
+    y          : FloatTensor (n_samples, n_assets)  shape (n_days, 19)
+                 NaN where label is missing.
     date_list  : list[pd.Timestamp]  — label date per sample (day after window end).
     asset_names: list[str]           — tickers in consistent alphabetical order.
     """
@@ -252,4 +254,32 @@ def _print_sanity_checks(
     print(f"    min={x_np.min():.4f}  max={x_np.max():.4f}  "
           f"mean={x_np.mean():.4f}  std={x_np.std():.4f}")
 
+    # [5] No NaNs check
+    n_nan_x = int(np.isnan(x_np).sum())
+    n_nan_y = int(np.isnan(y.numpy()).sum())
+    print(f"\n[5] NaN check:")
+    print(f"    X NaNs: {n_nan_x}  (expect 0)")
+    print(f"    y NaNs: {n_nan_y}  (expect 0)")
+
     print(f"{sep}\n")
+
+
+# ── standalone entry point ────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    seq_path = PROCESSED / "sequences.pt"
+    if seq_path.exists():
+        seq_path.unlink()
+        print(f"Deleted old {seq_path}")
+
+    print("Loading processed data...")
+    daily, daily_labels, _ = load_data()
+
+    print("Applying expanding z-score normalisation...")
+    daily_norm = expanding_zscore(daily, date_col="date")
+
+    print("Building 240-step daily sequences (this may take a few minutes)...")
+    X, y, date_list, asset_names = build_sequences(daily_norm, daily_labels, lookback=240)
+
+    save_sequences(X, y, date_list, asset_names)
+    print("\nDone — sequences.pt ready for training.")

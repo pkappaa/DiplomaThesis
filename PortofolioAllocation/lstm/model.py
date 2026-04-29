@@ -17,12 +17,12 @@ class LSTMClassifier(nn.Module):
 
     def __init__(
         self,
-        input_size: int = 99,
+        input_size: int = 209,   # 19 assets × 11 features
         hidden_size: int = 128,
         num_layers: int = 2,
         dropout: float = 0.3,
         num_heads: int = 2,
-        n_assets: int = 9,
+        n_assets: int = 19,
     ):
         super().__init__()
         self.input_norm    = nn.LayerNorm(input_size)

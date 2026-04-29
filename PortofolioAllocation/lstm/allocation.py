@@ -46,7 +46,7 @@ def probs_to_weights(probs_row: pd.Series, method: str = "score_weighted") -> pd
         return probs_row / total
 
     if method == "top_k":
-        k = min(5, len(probs_row))
+        k = min(5, len(probs_row))   # top 5 of 19 assets
         w = pd.Series(0.0, index=probs_row.index)
         w[probs_row.nlargest(k).index] = 1.0 / k
         return w

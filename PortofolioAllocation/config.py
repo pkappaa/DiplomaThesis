@@ -1,10 +1,11 @@
 # Global configuration for all modules
 
 # ── universe & benchmark ──────────────────────────────────────────────────────
-# 9 SPDR Select Sector ETFs that partition the S&P 500 into non-overlapping
-# sectors.  Using the full sector suite ensures the portfolio can rotate across
-# the entire equity market without overlap or gaps.
+# 19 multi-asset ETFs spanning US sectors, US style, international equity,
+# fixed income, and real assets.  The broadened universe enables cross-asset
+# rotation signals that a sector-only model cannot capture.
 ASSETS = [
+    # US sectors (9 SPDR Select Sector ETFs)
     "XLK",   # Information Technology
     "XLF",   # Financials
     "XLV",   # Health Care
@@ -14,7 +15,23 @@ ASSETS = [
     "XLP",   # Consumer Staples
     "XLB",   # Materials
     "XLU",   # Utilities
+    # US style
+    "QQQ",   # Nasdaq-100 (tech/growth)
+    "IWM",   # Russell 2000 (small-cap)
+    # International equity
+    "EFA",   # MSCI EAFE (developed ex-US)
+    "EEM",   # MSCI Emerging Markets
+    # Fixed income
+    "TLT",   # 20+ Year Treasury
+    "IEF",   # 7-10 Year Treasury
+    "HYG",   # High Yield Corporate
+    # Real assets
+    "GLD",   # Gold
+    "DBC",   # Commodities
+    "VNQ",   # US REITs
 ]
+
+N_ASSETS = 19
 
 # SPY is used as the market benchmark for performance attribution and as a
 # macro feature (market return, market volatility proxy) in the feature set.

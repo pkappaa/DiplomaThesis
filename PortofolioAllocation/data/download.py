@@ -1,5 +1,5 @@
 """
-Download raw daily OHLCV data for the  SPDR sector ETFs and the SPY benchmark.
+Download raw daily OHLCV data for the 19 multi-asset ETFs and the SPY benchmark.
 
 Strategy
 --------
@@ -23,6 +23,11 @@ import yfinance as yf
 # `python download.py` from inside the data/ directory.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import ASSETS, BENCHMARK, DATE_START, DATE_END
+
+# Approximate number of NYSE trading days from DATE_START to DATE_END.
+# Used only for the missing-days assertion; a tolerance of 5 days covers
+# data-provider gaps without masking genuine ticker data problems.
+_MAX_MISSING_TRADING_DAYS = 150
 
 RAW_DIR = Path(__file__).parent / "raw"
 
@@ -81,13 +86,26 @@ def _download_one(ticker: str) -> pd.DataFrame | None:
 
 # ── main download function ────────────────────────────────────────────────────
 
+def _expected_trading_days() -> int:
+    """
+    Estimate the number of NYSE trading days between DATE_START and DATE_END.
+    Uses pandas business-day count as an approximation (slightly over-counts by
+    ~9 days/year for US holidays, but is good enough for a < 5-gap assertion).
+    """
+    bdays = pd.bdate_range(start=DATE_START, end=DATE_END)
+    return len(bdays)
+
+
 def download() -> dict[str, int]:
     """
     Download all ASSETS + BENCHMARK tickers and save them as individual CSVs
     under data/raw/<TICKER>.csv.
 
-    Returns a summary dict {ticker: row_count} (row_count = 0 for failures),
-    which the caller (or the __main__ block) can use for further logging.
+    After saving, asserts that each successfully downloaded ticker has fewer
+    than _MAX_MISSING_TRADING_DAYS gaps relative to the full expected calendar,
+    so bad data is caught early before preprocessing.
+
+    Returns a summary dict {ticker: row_count} (row_count = 0 for failures).
     """
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -100,25 +118,51 @@ def download() -> dict[str, int]:
     print(f" Downloading {len(all_tickers)} tickers  |  {DATE_START} → {DATE_END}")
     print(f"{'='*60}\n")
 
+    expected_days = _expected_trading_days()
+
     for ticker in all_tickers:
         df = _download_one(ticker)
         if df is not None:
             out_path = RAW_DIR / f"{ticker}.csv"
             df.to_csv(out_path)
             results[ticker] = len(df)
-            print(f"  [OK]   {ticker:6s}  {len(df):4d} rows  →  {out_path.name}")
+            missing = max(0, expected_days - len(df))
+            print(f"  [OK]   {ticker:6s}  {len(df):4d} rows  missing≈{missing:3d}  →  {out_path.name}")
         else:
             results[ticker] = 0
 
-    # ── summary ───────────────────────────────────────────────────────────────
-    n_ok     = sum(1 for v in results.values() if v > 0)
-    failed   = [t for t, v in results.items() if v == 0]
-    print(f"\n{'─'*40}")
+    # ── missing-days assertion ────────────────────────────────────────────────
+    print(f"\n{'─'*60}")
+    print(f" {'Ticker':<8} {'Rows':>6} {'Missing':>8} {'Status':<10}")
+    print(f" {'------':<8} {'----':>6} {'-------':>8} {'------':<10}")
+    assertion_failures = []
+    for ticker in all_tickers:
+        rows    = results[ticker]
+        missing = max(0, expected_days - rows) if rows > 0 else expected_days
+        if rows == 0:
+            status = "FAILED"
+        elif missing >= _MAX_MISSING_TRADING_DAYS:
+            status = f"GAPS({missing})"
+            assertion_failures.append((ticker, missing))
+        else:
+            status = "OK"
+        print(f" {ticker:<8} {rows:>6} {missing:>8} {status:<10}")
+
+    n_ok   = sum(1 for v in results.values() if v > 0)
+    failed = [t for t, v in results.items() if v == 0]
+    print(f"{'─'*60}")
     print(f" {n_ok}/{len(all_tickers)} tickers downloaded successfully")
     if failed:
         print(f" FAILED tickers: {failed}")
         print(" Re-run or check your internet connection / yfinance version.")
-    print(f"{'─'*40}\n")
+    if assertion_failures:
+        msgs = ", ".join(f"{t}({m} missing)" for t, m in assertion_failures)
+        raise AssertionError(
+            f"Tickers with ≥ {_MAX_MISSING_TRADING_DAYS} missing trading days: {msgs}\n"
+            "Check yfinance data or consider adjusting DATE_START."
+        )
+    print(f" All tickers passed the < {_MAX_MISSING_TRADING_DAYS} missing-days check ✓")
+    print(f"{'─'*60}\n")
 
     return results
 
