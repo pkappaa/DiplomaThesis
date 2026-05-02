@@ -1,18 +1,21 @@
-"""RL agent setup for the LSTM-augmented environment."""
+"""RL+LSTM agent setup using Stable-Baselines3.
+
+input_size = 116  (78 base features + 19 lstm_probs_mean + 19 lstm_probs_std)
+"""
 
 from stable_baselines3 import PPO, SAC
 from stable_baselines3.common.vec_env import DummyVecEnv
-from rl_with_lstm.environment import PortfolioEnvWithPredictions
+from rl_with_lstm.environment import PortfolioEnv
 from config import RL_CONFIG
 import pandas as pd
 
 
-def make_env(log_returns: pd.DataFrame, predictions: pd.DataFrame):
-    return DummyVecEnv([lambda: PortfolioEnvWithPredictions(log_returns, predictions)])
+def make_env(log_returns: pd.DataFrame):
+    return DummyVecEnv([lambda: PortfolioEnv(log_returns)])
 
 
-def build_agent(log_returns: pd.DataFrame, predictions: pd.DataFrame):
-    env  = make_env(log_returns, predictions)
+def build_agent(log_returns: pd.DataFrame):
+    env = make_env(log_returns)
     algo = RL_CONFIG["algorithm"]
 
     if algo == "PPO":
