@@ -48,7 +48,7 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
 def _download_one(ticker: str) -> pd.DataFrame | None:
     """
     Fetch OHLCV for a single ticker from yfinance.
-
+    
     Returns None if yfinance returns no data or raises an exception, so the
     caller can continue to the next ticker without crashing the whole pipeline.
     Missing Close values are forward-filled because a handful of NaNs from

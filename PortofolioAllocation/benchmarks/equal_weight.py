@@ -72,6 +72,19 @@ def backtest(returns: pd.DataFrame, splits: dict) -> pd.Series:
     return result
 
 
+def _period_stats(rets: pd.Series, start: str, end: str) -> tuple:
+    """Return (ann_ret, ann_vol, sharpe) for a sub-period slice."""
+    r = rets[(rets.index >= pd.Timestamp(start)) & (rets.index <= pd.Timestamp(end))]
+    ann_ret = r.mean() * 252
+    ann_vol = r.std() * np.sqrt(252)
+    sharpe  = ann_ret / ann_vol if ann_vol > 1e-12 else float("nan")
+    return ann_ret, ann_vol, sharpe
+
+
+def _print_period(label: str, ann_ret: float, ann_vol: float, sharpe: float) -> None:
+    print(f"  {label:<18} ret={ann_ret:+.2%}  vol={ann_vol:.2%}  Sharpe={sharpe:.3f}")
+
+
 if __name__ == "__main__":
     returns, splits = _load_data()
     rets = backtest(returns, splits)
@@ -79,16 +92,27 @@ if __name__ == "__main__":
     out_path = DATA_DIR / f"{STRATEGY}_returns.csv"
     rets.to_csv(out_path)
 
-    final_w = np.ones(N_ASSETS) / N_ASSETS
-    ann_ret = rets.mean() * 252
-    ann_vol = rets.std() * np.sqrt(252)
-    sharpe  = ann_ret / ann_vol
+    val_stats  = _period_stats(rets, splits["val"]["start"],  splits["val"]["end"])
+    test_stats = _period_stats(rets, splits["test"]["start"], splits["test"]["end"])
+    comb_stats = _period_stats(rets, splits["val"]["start"],  splits["test"]["end"])
 
-    print(f"\n=== {STRATEGY} ===")
+    final_w = np.ones(N_ASSETS) / N_ASSETS
+
+    print(f"\n=== {STRATEGY}  ({N_ASSETS} assets) ===")
     print("Final weights:")
     for ticker, w in zip(ASSETS, final_w):
         print(f"  {ticker}: {w:.4f}")
-    print(f"Annualized return : {ann_ret:.4%}")
-    print(f"Annualized vol    : {ann_vol:.4%}")
-    print(f"Sharpe ratio      : {sharpe:.4f}")
-    print(f"Saved -> {out_path}")
+    print()
+    _print_period(
+        f"Val  ({splits['val']['start'][:7]} to {splits['val']['end'][:7]})",
+        *val_stats,
+    )
+    _print_period(
+        f"Test ({splits['test']['start'][:7]} to {splits['test']['end'][:7]})",
+        *test_stats,
+    )
+    _print_period(
+        f"Val+Test combined",
+        *comb_stats,
+    )
+    print(f"\nSaved -> {out_path}")
